@@ -1,6 +1,7 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "~/db";
 import { courses, enrollments, CourseStatus } from "~/db/schema";
+import { lessons, modules, quizAttempts, quizzes } from "~/db/schema";
 
 // ─── Instructor Analytics Service ───
 // Builds the whole instructor analytics payload for /dashboard in one call.
@@ -26,6 +27,8 @@ export type InstructorCourseRow = {
   slug: string;
   status: CourseStatus;
   students: number;
+  averageQuizScore: number | null;
+  quizPassRate: number | null;
 };
 
 export type InstructorAnalyticsSummary = {
@@ -79,6 +82,54 @@ function getStudentCountsByCourse(courseIds: number[]): Map<number, number> {
   return counts;
 }
 
+// ─── Metric: quiz score and pass rate ───
+// For each (student, quiz) in the course, keep only the best attempt (highest
+// score; a passing attempt wins a tie). Then average those best scores and
+// take the share of them that passed. Courses with no attempts are absent
+// from the map, so both metrics come out `null`.
+type QuizStats = { averageQuizScore: number; quizPassRate: number };
+
+function getQuizStatsByCourse(courseIds: number[]): Map<number, QuizStats> {
+  const stats = new Map<number, QuizStats>();
+  if (courseIds.length === 0) return stats;
+
+  const ranked = db
+    .select({
+      courseId: modules.courseId,
+      score: quizAttempts.score,
+      passed: quizAttempts.passed,
+      rank: sql<number>`row_number() over (
+        partition by ${quizAttempts.userId}, ${quizAttempts.quizId}
+        order by ${quizAttempts.score} desc, ${quizAttempts.passed} desc
+      )`.as("rank"),
+    })
+    .from(quizAttempts)
+    .innerJoin(quizzes, eq(quizzes.id, quizAttempts.quizId))
+    .innerJoin(lessons, eq(lessons.id, quizzes.lessonId))
+    .innerJoin(modules, eq(modules.id, lessons.moduleId))
+    .where(inArray(modules.courseId, courseIds))
+    .as("ranked");
+
+  const rows = db
+    .select({
+      courseId: ranked.courseId,
+      averageQuizScore: sql<number>`avg(${ranked.score})`,
+      quizPassRate: sql<number>`avg(case when ${ranked.passed} then 1.0 else 0.0 end)`,
+    })
+    .from(ranked)
+    .where(eq(ranked.rank, 1))
+    .groupBy(ranked.courseId)
+    .all();
+
+  for (const row of rows) {
+    stats.set(row.courseId, {
+      averageQuizScore: row.averageQuizScore,
+      quizPassRate: row.quizPassRate,
+    });
+  }
+  return stats;
+}
+
 function sum(values: number[]) {
   return values.reduce((total, value) => total + value, 0);
 }
@@ -94,6 +145,7 @@ export function getInstructorAnalytics(
 
   // One batched query per metric.
   const studentCounts = getStudentCountsByCourse(courseIds);
+  const quizStats = getQuizStatsByCourse(courseIds);
 
   const rows: InstructorCourseRow[] = includedCourses.map((course) => ({
     id: course.id,
@@ -101,6 +153,8 @@ export function getInstructorAnalytics(
     slug: course.slug,
     status: course.status,
     students: studentCounts.get(course.id) ?? 0,
+    averageQuizScore: quizStats.get(course.id)?.averageQuizScore ?? null,
+    quizPassRate: quizStats.get(course.id)?.quizPassRate ?? null,
   }));
 
   const summary: InstructorAnalyticsSummary = {

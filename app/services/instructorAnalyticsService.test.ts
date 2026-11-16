@@ -160,4 +160,92 @@ describe("instructorAnalyticsService", () => {
       expect(courseRow(analytics, base.course.id)?.students).toBe(0);
     });
   });
+
+  describe("quiz score and pass rate", () => {
+    let positionCounter = 0;
+
+    function createQuiz(courseId: number) {
+      positionCounter += 1;
+      const mod = testDb
+        .insert(schema.modules)
+        .values({ courseId, title: `Module ${positionCounter}`, position: positionCounter })
+        .returning()
+        .get();
+      const lesson = testDb
+        .insert(schema.lessons)
+        .values({ moduleId: mod.id, title: `Lesson ${positionCounter}`, position: 1 })
+        .returning()
+        .get();
+      return testDb
+        .insert(schema.quizzes)
+        .values({ lessonId: lesson.id, title: `Quiz ${positionCounter}`, passingScore: 0.7 })
+        .returning()
+        .get();
+    }
+
+    function attempt(userId: number, quizId: number, score: number, passed: boolean) {
+      return testDb
+        .insert(schema.quizAttempts)
+        .values({ userId, quizId, score, passed })
+        .returning()
+        .get();
+    }
+
+    it("counts only each student's best attempt for score and pass/fail", () => {
+      const quiz = createQuiz(base.course.id);
+      attempt(base.user.id, quiz.id, 0.4, false);
+      attempt(base.user.id, quiz.id, 0.9, true);
+      attempt(base.user.id, quiz.id, 0.5, false);
+
+      const row = courseRow(getInstructorAnalytics(base.instructor.id), base.course.id);
+
+      expect(row?.averageQuizScore).toBeCloseTo(0.9);
+      expect(row?.quizPassRate).toBe(1);
+    });
+
+    it("averages best attempts across several quizzes and students", () => {
+      const quizA = createQuiz(base.course.id);
+      const quizB = createQuiz(base.course.id);
+      const second = createUser();
+      // Best per (student, quiz): user/A 0.8 pass, user/B 0.6 fail,
+      // second/A 1.0 pass, second/B 0.2 fail.
+      attempt(base.user.id, quizA.id, 0.5, false);
+      attempt(base.user.id, quizA.id, 0.8, true);
+      attempt(base.user.id, quizB.id, 0.6, false);
+      attempt(second.id, quizA.id, 1.0, true);
+      attempt(second.id, quizB.id, 0.1, false);
+      attempt(second.id, quizB.id, 0.2, false);
+
+      // Another course's attempts stay in their own row.
+      const other = createCourse(schema.CourseStatus.Archived);
+      const otherQuiz = createQuiz(other.id);
+      attempt(base.user.id, otherQuiz.id, 0.3, false);
+
+      const analytics = getInstructorAnalytics(base.instructor.id);
+
+      const row = courseRow(analytics, base.course.id);
+      expect(row?.averageQuizScore).toBeCloseTo((0.8 + 0.6 + 1.0 + 0.2) / 4);
+      expect(row?.quizPassRate).toBeCloseTo(0.5);
+
+      const otherRow = courseRow(analytics, other.id);
+      expect(otherRow?.averageQuizScore).toBeCloseTo(0.3);
+      expect(otherRow?.quizPassRate).toBe(0);
+    });
+
+    it("is null for a course with no quizzes", () => {
+      const row = courseRow(getInstructorAnalytics(base.instructor.id), base.course.id);
+
+      expect(row?.averageQuizScore).toBeNull();
+      expect(row?.quizPassRate).toBeNull();
+    });
+
+    it("is null for a course whose quizzes have no attempts", () => {
+      createQuiz(base.course.id);
+
+      const row = courseRow(getInstructorAnalytics(base.instructor.id), base.course.id);
+
+      expect(row?.averageQuizScore).toBeNull();
+      expect(row?.quizPassRate).toBeNull();
+    });
+  });
 });
