@@ -160,4 +160,116 @@ describe("instructorAnalyticsService", () => {
       expect(courseRow(analytics, base.course.id)?.students).toBe(0);
     });
   });
+
+  describe("gross sales", () => {
+    const NOW = new Date("2026-06-30T12:00:00.000Z");
+    const DAY_MS = 86_400_000;
+
+    function daysBeforeNow(days: number) {
+      return new Date(NOW.getTime() - days * DAY_MS).toISOString();
+    }
+
+    function purchase(
+      courseId: number,
+      amountPaid: number,
+      createdAt: string = daysBeforeNow(100),
+      userId: number = base.user.id,
+      country: string | null = null
+    ) {
+      return testDb
+        .insert(schema.purchases)
+        .values({ userId, courseId, amountPaid, country, createdAt })
+        .returning()
+        .get();
+    }
+
+    it("sums the amount paid, so a PPP-discounted purchase counts at what the buyer paid", () => {
+      // A full-price buyer, and an Indian buyer who paid a PPP-discounted price.
+      purchase(base.course.id, 4999);
+      purchase(base.course.id, 1500, daysBeforeNow(100), createUser().id, "IN");
+
+      const analytics = getInstructorAnalytics(base.instructor.id, NOW);
+
+      expect(courseRow(analytics, base.course.id)?.grossSalesCents).toBe(6499);
+      expect(analytics.summary.grossSalesCents).toBe(6499);
+    });
+
+    it("counts a team purchase once at the amount paid, however many seats it has", () => {
+      const teamPurchase = purchase(base.course.id, 20000);
+      const team = testDb.insert(schema.teams).values({}).returning().get();
+      const redeemer = createUser();
+      testDb
+        .insert(schema.coupons)
+        .values([
+          {
+            teamId: team.id,
+            courseId: base.course.id,
+            code: "SEAT-1",
+            purchaseId: teamPurchase.id,
+            redeemedByUserId: redeemer.id,
+            redeemedAt: daysBeforeNow(90),
+          },
+          {
+            teamId: team.id,
+            courseId: base.course.id,
+            code: "SEAT-2",
+            purchaseId: teamPurchase.id,
+          },
+        ])
+        .run();
+      enrol(redeemer.id, base.course.id);
+
+      const analytics = getInstructorAnalytics(base.instructor.id, NOW);
+
+      expect(courseRow(analytics, base.course.id)?.grossSalesCents).toBe(20000);
+      expect(analytics.summary.grossSalesCents).toBe(20000);
+    });
+
+    it("includes archived courses and leaves drafts out", () => {
+      const archived = createCourse(schema.CourseStatus.Archived);
+      const draft = createCourse(schema.CourseStatus.Draft);
+      purchase(base.course.id, 1000);
+      purchase(archived.id, 2000);
+      purchase(draft.id, 4000);
+
+      const analytics = getInstructorAnalytics(base.instructor.id, NOW);
+
+      expect(courseRow(analytics, archived.id)?.grossSalesCents).toBe(2000);
+      expect(analytics.summary.grossSalesCents).toBe(3000);
+      expect(analytics.summary.grossSalesLast30DaysCents).toBe(0);
+    });
+
+    it("honours the 30-day boundary measured back from now", () => {
+      purchase(base.course.id, 100, daysBeforeNow(30)); // exactly on the boundary: in
+      purchase(base.course.id, 200, daysBeforeNow(1)); // in
+      purchase(base.course.id, 400, daysBeforeNow(30.01)); // just outside: out
+      purchase(base.course.id, 800, daysBeforeNow(365)); // out
+
+      const analytics = getInstructorAnalytics(base.instructor.id, NOW);
+
+      expect(analytics.summary.grossSalesLast30DaysCents).toBe(300);
+      expect(analytics.summary.grossSalesCents).toBe(1500);
+    });
+
+    it("shows 0 sales for a course with no purchases", () => {
+      const analytics = getInstructorAnalytics(base.instructor.id, NOW);
+
+      expect(courseRow(analytics, base.course.id)?.grossSalesCents).toBe(0);
+      expect(analytics.summary).toMatchObject({
+        grossSalesCents: 0,
+        grossSalesLast30DaysCents: 0,
+      });
+    });
+
+    it("never counts another instructor's sales", () => {
+      const other = createUser(schema.UserRole.Instructor);
+      const theirs = createCourse(schema.CourseStatus.Published, other.id);
+      purchase(theirs.id, 9999, daysBeforeNow(1));
+
+      const analytics = getInstructorAnalytics(base.instructor.id, NOW);
+
+      expect(analytics.summary.grossSalesCents).toBe(0);
+      expect(analytics.summary.grossSalesLast30DaysCents).toBe(0);
+    });
+  });
 });

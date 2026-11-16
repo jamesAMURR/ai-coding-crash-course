@@ -1,6 +1,6 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "~/db";
-import { courses, enrollments, CourseStatus } from "~/db/schema";
+import { courses, enrollments, purchases, CourseStatus } from "~/db/schema";
 
 // ─── Instructor Analytics Service ───
 // Builds the whole instructor analytics payload for /dashboard in one call.
@@ -26,11 +26,14 @@ export type InstructorCourseRow = {
   slug: string;
   status: CourseStatus;
   students: number;
+  grossSalesCents: number;
 };
 
 export type InstructorAnalyticsSummary = {
   coursesTeaching: number;
   totalStudents: number;
+  grossSalesCents: number;
+  grossSalesLast30DaysCents: number;
 };
 
 export type InstructorAnalytics = {
@@ -79,6 +82,44 @@ function getStudentCountsByCourse(courseIds: number[]): Map<number, number> {
   return counts;
 }
 
+// ─── Metric: gross sales ───
+// Sum of amountPaid on purchase rows per course, in USD cents. amountPaid
+// already reflects PPP pricing, and a team purchase is a single row, so it
+// counts once at what the team paid. The 30-day window uses the purchase date
+// measured back from `now` (inclusive of the boundary instant).
+type GrossSales = { allTimeCents: number; last30DaysCents: number };
+
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+
+function getGrossSalesByCourse(
+  courseIds: number[],
+  now: Date
+): Map<number, GrossSales> {
+  const sales = new Map<number, GrossSales>();
+  if (courseIds.length === 0) return sales;
+
+  const cutoff = new Date(now.getTime() - THIRTY_DAYS_MS).toISOString();
+
+  const rows = db
+    .select({
+      courseId: purchases.courseId,
+      allTimeCents: sql<number>`coalesce(sum(${purchases.amountPaid}), 0)`,
+      last30DaysCents: sql<number>`coalesce(sum(case when ${purchases.createdAt} >= ${cutoff} then ${purchases.amountPaid} else 0 end), 0)`,
+    })
+    .from(purchases)
+    .where(inArray(purchases.courseId, courseIds))
+    .groupBy(purchases.courseId)
+    .all();
+
+  for (const row of rows) {
+    sales.set(row.courseId, {
+      allTimeCents: row.allTimeCents,
+      last30DaysCents: row.last30DaysCents,
+    });
+  }
+  return sales;
+}
+
 function sum(values: number[]) {
   return values.reduce((total, value) => total + value, 0);
 }
@@ -87,13 +128,12 @@ export function getInstructorAnalytics(
   instructorId: number,
   now: Date = new Date()
 ): InstructorAnalytics {
-  void now; // Reserved for time-windowed metrics.
-
   const includedCourses = getIncludedCourses(instructorId);
   const courseIds = includedCourses.map((c) => c.id);
 
   // One batched query per metric.
   const studentCounts = getStudentCountsByCourse(courseIds);
+  const grossSales = getGrossSalesByCourse(courseIds, now);
 
   const rows: InstructorCourseRow[] = includedCourses.map((course) => ({
     id: course.id,
@@ -101,12 +141,17 @@ export function getInstructorAnalytics(
     slug: course.slug,
     status: course.status,
     students: studentCounts.get(course.id) ?? 0,
+    grossSalesCents: grossSales.get(course.id)?.allTimeCents ?? 0,
   }));
 
   const summary: InstructorAnalyticsSummary = {
     coursesTeaching: rows.filter((r) => r.status === CourseStatus.Published)
       .length,
     totalStudents: sum(rows.map((r) => r.students)),
+    grossSalesCents: sum(rows.map((r) => r.grossSalesCents)),
+    grossSalesLast30DaysCents: sum(
+      [...grossSales.values()].map((s) => s.last30DaysCents)
+    ),
   };
 
   return { summary, courses: rows };

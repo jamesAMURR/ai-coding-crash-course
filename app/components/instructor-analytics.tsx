@@ -4,6 +4,7 @@ import { Plus } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { CourseStatus } from "~/db/schema";
+import { formatPrice } from "~/lib/utils";
 import type {
   InstructorAnalytics,
   InstructorAnalyticsSummary,
@@ -23,6 +24,11 @@ export function formatMetric<T>(
   return value === null || value === undefined ? "—" : format(value);
 }
 
+// formatPrice renders 0 as "Free", which misreads for earnings; show $0.00.
+function formatSales(cents: number) {
+  return cents === 0 ? "$0.00" : formatPrice(cents);
+}
+
 type Tile = {
   label: string;
   value: (summary: InstructorAnalyticsSummary) => ReactNode;
@@ -37,6 +43,12 @@ const TILES: Tile[] = [
   {
     label: "Total students",
     value: (s) => formatMetric(s.totalStudents),
+  },
+  {
+    label: "Gross sales",
+    value: (s) => formatMetric(s.grossSalesCents, formatSales),
+    detail: (s) =>
+      `${formatMetric(s.grossSalesLast30DaysCents, formatSales)} in the last 30 days`,
   },
 ];
 
@@ -63,6 +75,11 @@ const COLUMNS: Column[] = [
     header: "Students",
     align: "right",
     cell: (row) => formatMetric(row.students),
+  },
+  {
+    header: "Gross sales",
+    align: "right",
+    cell: (row) => formatMetric(row.grossSalesCents, formatSales),
   },
 ];
 
