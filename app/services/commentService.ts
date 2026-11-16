@@ -21,6 +21,7 @@ import {
   modules,
   users,
   UserRole,
+  CourseStatus,
 } from "~/db/schema";
 import { MIN_COMMENT_LENGTH, MAX_COMMENT_LENGTH } from "~/lib/comments";
 
@@ -272,9 +273,9 @@ export type QueuedQuestion = {
 };
 
 // ─── The unanswered rule ───
-// A comment is unanswered when it is top-level, not deleted, not written by the
-// course's instructor or an admin, and has no live reply from the course's
-// instructor or an admin. This is the single definition: the questions queue
+// A comment is unanswered when it is on a non-draft course, top-level, not
+// deleted, not written by the course's instructor or an admin, and has no live
+// reply from the course's instructor or an admin. This is the single definition: the questions queue
 // and the per-course counts both build on it, so they can never disagree.
 
 /** The comment's author, as joined by whereUnanswered. */
@@ -320,6 +321,8 @@ function whereUnanswered<T extends SQLiteSelect<"comments">>(
     .innerJoin(courses, eq(modules.courseId, courses.id))
     .where(
       and(
+        // Drafts aren't live, so their comments aren't work yet.
+        ne(courses.status, CourseStatus.Draft),
         isNull(comments.parentId),
         isNull(comments.deletedAt),
         // Staff asking their own question shouldn't queue up as work for themselves.

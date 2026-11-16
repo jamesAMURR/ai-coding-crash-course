@@ -486,6 +486,33 @@ describe("commentService", () => {
       expect(getUnansweredQuestions(null)).toHaveLength(2);
     });
 
+    it("leaves out questions on draft courses, for instructors and admins", () => {
+      const draft = testDb
+        .insert(schema.courses)
+        .values({
+          title: "Draft Course",
+          slug: "draft-course",
+          description: "Unfinished",
+          salesCopy: "Sales copy.",
+          instructorId: base.instructor.id,
+          categoryId: base.category.id,
+          status: schema.CourseStatus.Draft,
+        })
+        .returning()
+        .get();
+      const draftLesson = createLesson(draft.id, "Draft Lesson");
+
+      createComment(base.user.id, lesson.id, null, "Published");
+      createComment(base.user.id, draftLesson.id, null, "Draft");
+
+      expect(getUnansweredQuestions(base.instructor.id).map((q) => q.body)).toEqual(
+        ["Published"]
+      );
+      expect(getUnansweredQuestions(null).map((q) => q.body)).toEqual([
+        "Published",
+      ]);
+    });
+
     it("orders newest first", () => {
       createComment(base.user.id, lesson.id, null, "Older");
       createComment(base.user.id, lesson.id, null, "Newer");
