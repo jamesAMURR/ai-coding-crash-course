@@ -113,6 +113,18 @@ const COLUMNS: Column[] = [
     align: "right",
     cell: (row) => formatMetric(row.unansweredComments),
   },
+  {
+    header: "Avg. quiz score",
+    align: "right",
+    cell: (row) =>
+      formatMetric(row.averageQuizScore, (v) => `${Math.round(v * 100)}%`),
+  },
+  {
+    header: "Pass rate",
+    align: "right",
+    cell: (row) =>
+      formatMetric(row.quizPassRate, (v) => `${Math.round(v * 100)}%`),
+  },
 ];
 
 function StatusBadge({ status }: { status: CourseStatus }) {
