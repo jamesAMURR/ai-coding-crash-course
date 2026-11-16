@@ -21,6 +21,7 @@ import {
   getLessonThread,
   getCommentCountForLesson,
   getUnansweredQuestions,
+  getUnansweredCommentCountsByCourse,
   getCourseForLesson,
 } from "./commentService";
 
@@ -492,6 +493,158 @@ describe("commentService", () => {
       expect(getUnansweredQuestions(base.instructor.id).map((q) => q.body)).toEqual(
         ["Newer", "Older"]
       );
+    });
+  });
+
+  describe("getUnansweredCommentCountsByCourse", () => {
+    function createOtherCourse() {
+      const otherInstructor = createUser(
+        "Other Instructor",
+        "other-instructor@example.com",
+        schema.UserRole.Instructor
+      );
+      const otherCourse = testDb
+        .insert(schema.courses)
+        .values({
+          title: "Other Course",
+          slug: "other-course",
+          description: "Another",
+          salesCopy: "Sales copy.",
+          instructorId: otherInstructor.id,
+          categoryId: base.category.id,
+          status: schema.CourseStatus.Published,
+        })
+        .returning()
+        .get();
+      const otherLesson = createLesson(otherCourse.id, "Other Lesson");
+      return { otherInstructor, otherCourse, otherLesson };
+    }
+
+    it("returns an empty map for no course ids", () => {
+      createComment(base.user.id, lesson.id, null, "How?");
+
+      expect(getUnansweredCommentCountsByCourse([]).size).toBe(0);
+    });
+
+    it("returns zero for a course with no unanswered comments", () => {
+      const counts = getUnansweredCommentCountsByCourse([base.course.id]);
+
+      expect(counts.get(base.course.id)).toBe(0);
+    });
+
+    it("counts unanswered student comments on a course", () => {
+      const second = createLesson(base.course.id, "Second Lesson");
+      createComment(base.user.id, lesson.id, null, "How?");
+      createComment(base.user.id, second.id, null, "Why?");
+
+      expect(
+        getUnansweredCommentCountsByCourse([base.course.id]).get(base.course.id)
+      ).toBe(2);
+    });
+
+    it("does not count a comment the owning instructor replied to", () => {
+      const question = createComment(base.user.id, lesson.id, null, "How?");
+      createComment(base.instructor.id, lesson.id, question.id, "Like this");
+
+      expect(
+        getUnansweredCommentCountsByCourse([base.course.id]).get(base.course.id)
+      ).toBe(0);
+    });
+
+    it("does not count a comment an admin replied to", () => {
+      const admin = createUser(
+        "Admin",
+        "admin@example.com",
+        schema.UserRole.Admin
+      );
+      const question = createComment(base.user.id, lesson.id, null, "How?");
+      createComment(admin.id, lesson.id, question.id, "Like this");
+
+      expect(
+        getUnansweredCommentCountsByCourse([base.course.id]).get(base.course.id)
+      ).toBe(0);
+    });
+
+    it("still counts a comment when only a student or another instructor replied", () => {
+      const { otherInstructor } = createOtherCourse();
+      const student = createUser(
+        "Other",
+        "other@example.com",
+        schema.UserRole.Student
+      );
+      const question = createComment(base.user.id, lesson.id, null, "How?");
+      createComment(student.id, lesson.id, question.id, "Me too");
+      createComment(otherInstructor.id, lesson.id, question.id, "Not my course");
+
+      expect(
+        getUnansweredCommentCountsByCourse([base.course.id]).get(base.course.id)
+      ).toBe(1);
+    });
+
+    it("still counts a comment whose staff reply was deleted", () => {
+      const question = createComment(base.user.id, lesson.id, null, "How?");
+      const reply = createComment(
+        base.instructor.id,
+        lesson.id,
+        question.id,
+        "Oops"
+      );
+      deleteComment(reply.id, base.instructor.id, false);
+
+      expect(
+        getUnansweredCommentCountsByCourse([base.course.id]).get(base.course.id)
+      ).toBe(1);
+    });
+
+    it("ignores deleted comments", () => {
+      const question = createComment(base.user.id, lesson.id, null, "Spam");
+      deleteComment(question.id, base.instructor.id, true);
+
+      expect(
+        getUnansweredCommentCountsByCourse([base.course.id]).get(base.course.id)
+      ).toBe(0);
+    });
+
+    it("ignores comments written by the owning instructor or an admin", () => {
+      const admin = createUser(
+        "Admin",
+        "admin@example.com",
+        schema.UserRole.Admin
+      );
+      createComment(base.instructor.id, lesson.id, null, "Announcement");
+      createComment(admin.id, lesson.id, null, "Notice");
+
+      expect(
+        getUnansweredCommentCountsByCourse([base.course.id]).get(base.course.id)
+      ).toBe(0);
+    });
+
+    it("ignores replies — only top-level comments count", () => {
+      const question = createComment(base.user.id, lesson.id, null, "How?");
+      createComment(base.instructor.id, lesson.id, question.id, "Like this");
+      createComment(base.user.id, lesson.id, question.id, "Still stuck");
+
+      expect(
+        getUnansweredCommentCountsByCourse([base.course.id]).get(base.course.id)
+      ).toBe(0);
+    });
+
+    it("groups counts by course and leaves out courses not asked for", () => {
+      const { otherCourse, otherLesson } = createOtherCourse();
+      createComment(base.user.id, lesson.id, null, "Mine");
+      createComment(base.user.id, otherLesson.id, null, "Theirs 1");
+      createComment(base.user.id, otherLesson.id, null, "Theirs 2");
+
+      const mine = getUnansweredCommentCountsByCourse([base.course.id]);
+      expect(mine.get(base.course.id)).toBe(1);
+      expect(mine.has(otherCourse.id)).toBe(false);
+
+      const both = getUnansweredCommentCountsByCourse([
+        base.course.id,
+        otherCourse.id,
+      ]);
+      expect(both.get(base.course.id)).toBe(1);
+      expect(both.get(otherCourse.id)).toBe(2);
     });
   });
 

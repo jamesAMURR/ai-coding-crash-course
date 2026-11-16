@@ -5,6 +5,8 @@ import {
   and,
   isNull,
   notExists,
+  inArray,
+  count,
   sql,
   desc,
   asc,
@@ -268,22 +270,22 @@ export type QueuedQuestion = {
   authorAvatarUrl: string | null;
 };
 
-/**
- * Questions still waiting on an answer, newest first.
- *
- * A question qualifies when it is top-level, not deleted, not written by staff,
- * and has no reply from the course's instructor or an admin. Pass null for
- * instructorId to span every course (admins); pass an id to scope to the
- * courses that instructor owns.
- */
-export function getUnansweredQuestions(
-  instructorId: number | null
-): QueuedQuestion[] {
-  const author = alias(users, "author");
+// ─── The unanswered rule ───
+// A comment is unanswered when it is top-level, not deleted, not written by the
+// course's instructor or an admin, and has no live reply from the course's
+// instructor or an admin. This is the single definition: the questions queue
+// and the per-course counts both build on it, so they can never disagree.
+//
+// Queries using it must select from `comments`, join `unansweredAuthor` on
+// `comments.userId`, and join through lessons and modules to `courses`.
+
+const unansweredAuthor = alias(users, "author");
+
+function unansweredConditions() {
   const reply = alias(comments, "reply");
   const replyAuthor = alias(users, "reply_author");
 
-  // Correlated: matches a live reply, by staff, to the outer question.
+  // Correlated: matches a live reply, by staff, to the outer comment.
   const staffReply = db
     .select({ one: sql`1` })
     .from(reply)
@@ -299,14 +301,55 @@ export function getUnansweredQuestions(
       )
     );
 
-  const conditions = [
+  return [
     isNull(comments.parentId),
     isNull(comments.deletedAt),
     // Staff asking their own question shouldn't queue up as work for themselves.
-    ne(author.role, UserRole.Admin),
+    ne(unansweredAuthor.role, UserRole.Admin),
     ne(comments.userId, courses.instructorId),
     notExists(staffReply),
   ];
+}
+
+/**
+ * Unanswered comment counts for the given courses, keyed by course id.
+ *
+ * Every requested course gets an entry (zero when it has none); courses not
+ * requested are absent. An empty input returns an empty map.
+ */
+export function getUnansweredCommentCountsByCourse(
+  courseIds: number[]
+): Map<number, number> {
+  const counts = new Map<number, number>(courseIds.map((id) => [id, 0]));
+  if (courseIds.length === 0) return counts;
+
+  const rows = db
+    .select({ courseId: courses.id, count: count() })
+    .from(comments)
+    .innerJoin(unansweredAuthor, eq(comments.userId, unansweredAuthor.id))
+    .innerJoin(lessons, eq(comments.lessonId, lessons.id))
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .innerJoin(courses, eq(modules.courseId, courses.id))
+    .where(and(...unansweredConditions(), inArray(courses.id, courseIds)))
+    .groupBy(courses.id)
+    .all();
+
+  for (const row of rows) counts.set(row.courseId, row.count);
+  return counts;
+}
+
+/**
+ * Questions still waiting on an answer, newest first.
+ *
+ * A question qualifies under the unanswered rule above. Pass null for
+ * instructorId to span every course (admins); pass an id to scope to the
+ * courses that instructor owns.
+ */
+export function getUnansweredQuestions(
+  instructorId: number | null
+): QueuedQuestion[] {
+  const author = unansweredAuthor;
+  const conditions = unansweredConditions();
 
   if (instructorId !== null) {
     conditions.push(eq(courses.instructorId, instructorId));
