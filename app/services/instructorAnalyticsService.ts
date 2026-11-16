@@ -1,6 +1,7 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "~/db";
-import { courses, enrollments, CourseStatus } from "~/db/schema";
+import { courses, courseRatings, enrollments, CourseStatus } from "~/db/schema";
+import { getCourseRatingSummaries } from "~/services/courseRatingService";
 
 // ─── Instructor Analytics Service ───
 // Builds the whole instructor analytics payload for /dashboard in one call.
@@ -26,11 +27,15 @@ export type InstructorCourseRow = {
   slug: string;
   status: CourseStatus;
   students: number;
+  ratingAverage: number | null;
+  ratingCount: number;
 };
 
 export type InstructorAnalyticsSummary = {
   coursesTeaching: number;
   totalStudents: number;
+  averageRating: number | null;
+  ratingCount: number;
 };
 
 export type InstructorAnalytics = {
@@ -79,6 +84,24 @@ function getStudentCountsByCourse(courseIds: number[]): Map<number, number> {
   return counts;
 }
 
+// ─── Metric: ratings ───
+// Per-course average and count reuse the batched getCourseRatingSummaries.
+// The portfolio average is weighted by rating count — the mean of every
+// individual rating — so it is computed from the raw rows in one query rather
+// than from the (rounded) course averages.
+function getPortfolioRating(courseIds: number[]): number | null {
+  if (courseIds.length === 0) return null;
+
+  const result = db
+    .select({ average: sql<number | null>`avg(${courseRatings.rating})` })
+    .from(courseRatings)
+    .where(inArray(courseRatings.courseId, courseIds))
+    .get();
+
+  const average = result?.average ?? null;
+  return average === null ? null : Math.round(average * 10) / 10;
+}
+
 function sum(values: number[]) {
   return values.reduce((total, value) => total + value, 0);
 }
@@ -94,6 +117,7 @@ export function getInstructorAnalytics(
 
   // One batched query per metric.
   const studentCounts = getStudentCountsByCourse(courseIds);
+  const ratingSummaries = getCourseRatingSummaries(courseIds);
 
   const rows: InstructorCourseRow[] = includedCourses.map((course) => ({
     id: course.id,
@@ -101,12 +125,16 @@ export function getInstructorAnalytics(
     slug: course.slug,
     status: course.status,
     students: studentCounts.get(course.id) ?? 0,
+    ratingAverage: ratingSummaries.get(course.id)?.average ?? null,
+    ratingCount: ratingSummaries.get(course.id)?.count ?? 0,
   }));
 
   const summary: InstructorAnalyticsSummary = {
     coursesTeaching: rows.filter((r) => r.status === CourseStatus.Published)
       .length,
     totalStudents: sum(rows.map((r) => r.students)),
+    averageRating: getPortfolioRating(courseIds),
+    ratingCount: sum(rows.map((r) => r.ratingCount)),
   };
 
   return { summary, courses: rows };
