@@ -39,6 +39,11 @@ const TILES: Tile[] = [
     value: (s) => formatMetric(s.totalStudents),
   },
   {
+    label: "Average rating",
+    value: (s) => formatMetric(s.averageRating, (v) => `${v.toFixed(1)} ★`),
+    detail: (s) => `${s.ratingCount} ${s.ratingCount === 1 ? "rating" : "ratings"}`,
+  },
+  {
     label: "Unanswered comments",
     value: (s) => (
       <Link to="/instructor/questions" className="hover:text-primary">
@@ -76,6 +81,15 @@ const COLUMNS: Column[] = [
     header: "Students",
     align: "right",
     cell: (row) => formatMetric(row.students),
+  },
+  {
+    header: "Rating",
+    align: "right",
+    cell: (row) =>
+      formatMetric(
+        row.ratingAverage,
+        (v) => `${v.toFixed(1)} ★ (${row.ratingCount})`
+      ),
   },
   {
     header: "Unanswered comments",

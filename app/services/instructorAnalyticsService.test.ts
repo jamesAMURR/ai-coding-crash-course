@@ -64,6 +64,14 @@ function enrol(userId: number, courseId: number) {
     .get();
 }
 
+function rate(courseId: number, rating: number, userId: number = createUser().id) {
+  return testDb
+    .insert(schema.courseRatings)
+    .values({ userId, courseId, rating })
+    .returning()
+    .get();
+}
+
 function courseRow(analytics: ReturnType<typeof getInstructorAnalytics>, id: number) {
   return analytics.courses.find((c) => c.id === id);
 }
@@ -159,6 +167,56 @@ describe("instructorAnalyticsService", () => {
       const analytics = getInstructorAnalytics(base.instructor.id);
 
       expect(courseRow(analytics, base.course.id)?.students).toBe(0);
+    });
+  });
+
+  describe("ratings", () => {
+    it("weights the portfolio average by the number of ratings", () => {
+      const second = createCourse(schema.CourseStatus.Published);
+      rate(base.course.id, 5);
+      for (let i = 0; i < 10; i++) rate(second.id, 3);
+
+      const analytics = getInstructorAnalytics(base.instructor.id);
+
+      // (5 + 10 × 3) / 11 ≈ 3.18, not the course-average mean of 4.
+      expect(analytics.summary.averageRating).toBe(3.2);
+      expect(analytics.summary.ratingCount).toBe(11);
+      expect(courseRow(analytics, base.course.id)).toMatchObject({
+        ratingAverage: 5,
+        ratingCount: 1,
+      });
+      expect(courseRow(analytics, second.id)).toMatchObject({
+        ratingAverage: 3,
+        ratingCount: 10,
+      });
+    });
+
+    it("includes archived courses and leaves drafts out", () => {
+      const archived = createCourse(schema.CourseStatus.Archived);
+      const draft = createCourse(schema.CourseStatus.Draft);
+      rate(archived.id, 4);
+      rate(archived.id, 2);
+      rate(draft.id, 1);
+
+      const analytics = getInstructorAnalytics(base.instructor.id);
+
+      expect(courseRow(analytics, archived.id)).toMatchObject({
+        ratingAverage: 3,
+        ratingCount: 2,
+      });
+      expect(analytics.summary.averageRating).toBe(3);
+      expect(analytics.summary.ratingCount).toBe(2);
+    });
+
+    it("returns null averages when there are no ratings", () => {
+      const analytics = getInstructorAnalytics(base.instructor.id);
+
+      expect(analytics.summary.averageRating).toBeNull();
+      expect(analytics.summary.ratingCount).toBe(0);
+      expect(courseRow(analytics, base.course.id)).toMatchObject({
+        ratingAverage: null,
+        ratingCount: 0,
+      });
     });
   });
 
