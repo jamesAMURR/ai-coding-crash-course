@@ -351,6 +351,15 @@ describe("instructorAnalyticsService", () => {
       expect(analytics.summary.grossSalesCents).toBe(1500);
     });
 
+    it("leaves purchases dated after now out of the 30-day window", () => {
+      purchase(base.course.id, 100, daysBeforeNow(1)); // in
+      purchase(base.course.id, 200, daysBeforeNow(-1)); // after now: out
+
+      const analytics = getInstructorAnalytics(base.instructor.id, NOW);
+
+      expect(analytics.summary.grossSalesLast30DaysCents).toBe(100);
+    });
+
     it("shows 0 sales for a course with no purchases", () => {
       const analytics = getInstructorAnalytics(base.instructor.id, NOW);
 
@@ -513,6 +522,7 @@ describe("instructorAnalyticsService", () => {
 
     it("counts only each student's best attempt for score and pass/fail", () => {
       const quiz = createQuiz(base.course.id);
+      enrol(base.user.id, base.course.id);
       attempt(base.user.id, quiz.id, 0.4, false);
       attempt(base.user.id, quiz.id, 0.9, true);
       attempt(base.user.id, quiz.id, 0.5, false);
@@ -527,6 +537,8 @@ describe("instructorAnalyticsService", () => {
       const quizA = createQuiz(base.course.id);
       const quizB = createQuiz(base.course.id);
       const second = createUser();
+      enrol(base.user.id, base.course.id);
+      enrol(second.id, base.course.id);
       // Best per (student, quiz): user/A 0.8 pass, user/B 0.6 fail,
       // second/A 1.0 pass, second/B 0.2 fail.
       attempt(base.user.id, quizA.id, 0.5, false);
@@ -539,6 +551,7 @@ describe("instructorAnalyticsService", () => {
       // Another course's attempts stay in their own row.
       const other = createCourse(schema.CourseStatus.Archived);
       const otherQuiz = createQuiz(other.id);
+      enrol(base.user.id, other.id);
       attempt(base.user.id, otherQuiz.id, 0.3, false);
 
       const analytics = getInstructorAnalytics(base.instructor.id);
@@ -550,6 +563,30 @@ describe("instructorAnalyticsService", () => {
       const otherRow = courseRow(analytics, other.id);
       expect(otherRow?.averageQuizScore).toBeCloseTo(0.3);
       expect(otherRow?.quizPassRate).toBe(0);
+    });
+
+    it("counts only attempts from users enrolled in the course", () => {
+      const quiz = createQuiz(base.course.id);
+      enrol(base.user.id, base.course.id);
+      attempt(base.user.id, quiz.id, 0.9, true);
+      // The instructor trying their own quiz, and a user with no enrolment.
+      attempt(base.instructor.id, quiz.id, 0.1, false);
+      attempt(createUser().id, quiz.id, 0.2, false);
+
+      const row = courseRow(getInstructorAnalytics(base.instructor.id), base.course.id);
+
+      expect(row?.averageQuizScore).toBeCloseTo(0.9);
+      expect(row?.quizPassRate).toBe(1);
+    });
+
+    it("is null when the only attempts are from unenrolled users", () => {
+      const quiz = createQuiz(base.course.id);
+      attempt(base.instructor.id, quiz.id, 0.1, false);
+
+      const row = courseRow(getInstructorAnalytics(base.instructor.id), base.course.id);
+
+      expect(row?.averageQuizScore).toBeNull();
+      expect(row?.quizPassRate).toBeNull();
     });
 
     it("is null for a course with no quizzes", () => {

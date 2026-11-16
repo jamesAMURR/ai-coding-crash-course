@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, lte, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "~/db";
 import {
   courses,
@@ -87,24 +87,59 @@ function getIncludedCourses(instructorId: number) {
     .all();
 }
 
-// ─── Metric: students ───
-// Enrolment rows per course (a student in two courses counts twice).
-function getStudentCountsByCourse(courseIds: number[]): Map<number, number> {
-  const counts = new Map<number, number>();
-  if (courseIds.length === 0) return counts;
+// ─── "Last 30 days" window ───
+// Shared by every time-windowed metric: from 30 days before `now` up to `now`,
+// inclusive at both ends. ISO strings compare correctly as text in SQLite.
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+
+function last30DaysWindow(now: Date) {
+  return {
+    since: new Date(now.getTime() - THIRTY_DAYS_MS).toISOString(),
+    until: now.toISOString(),
+  };
+}
+
+// ─── Metrics: students, completion count, new students ───
+// One GROUP BY over enrolments per course:
+// - students: enrolment rows (a student in two courses counts twice)
+// - completed: enrolments with a completion date (divided by students when
+//   assembling rows; null when a course has no students)
+// - newLast30Days: enrolments whose enrolment date falls in the 30-day window
+type EnrollmentStats = {
+  students: number;
+  completed: number;
+  newLast30Days: number;
+};
+
+function getEnrollmentStatsByCourse(
+  courseIds: number[],
+  now: Date
+): Map<number, EnrollmentStats> {
+  const stats = new Map<number, EnrollmentStats>();
+  if (courseIds.length === 0) return stats;
+
+  const { since, until } = last30DaysWindow(now);
 
   const rows = db
     .select({
       courseId: enrollments.courseId,
-      count: sql<number>`count(*)`,
+      students: sql<number>`count(*)`,
+      completed: sql<number>`count(${enrollments.completedAt})`,
+      newLast30Days: sql<number>`coalesce(sum(case when ${enrollments.enrolledAt} between ${since} and ${until} then 1 else 0 end), 0)`,
     })
     .from(enrollments)
     .where(inArray(enrollments.courseId, courseIds))
     .groupBy(enrollments.courseId)
     .all();
 
-  for (const row of rows) counts.set(row.courseId, row.count);
-  return counts;
+  for (const row of rows) {
+    stats.set(row.courseId, {
+      students: row.students,
+      completed: row.completed,
+      newLast30Days: row.newLast30Days,
+    });
+  }
+  return stats;
 }
 
 // ─── Metric: ratings ───
@@ -128,11 +163,9 @@ function getPortfolioRating(courseIds: number[]): number | null {
 // ─── Metric: gross sales ───
 // Sum of amountPaid on purchase rows per course, in USD cents. amountPaid
 // already reflects PPP pricing, and a team purchase is a single row, so it
-// counts once at what the team paid. The 30-day window uses the purchase date
-// measured back from `now` (inclusive of the boundary instant).
+// counts once at what the team paid. The 30-day figure uses the purchase date
+// and the shared last30DaysWindow.
 type GrossSales = { allTimeCents: number; last30DaysCents: number };
-
-const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
 function getGrossSalesByCourse(
   courseIds: number[],
@@ -141,13 +174,13 @@ function getGrossSalesByCourse(
   const sales = new Map<number, GrossSales>();
   if (courseIds.length === 0) return sales;
 
-  const cutoff = new Date(now.getTime() - THIRTY_DAYS_MS).toISOString();
+  const { since, until } = last30DaysWindow(now);
 
   const rows = db
     .select({
       courseId: purchases.courseId,
       allTimeCents: sql<number>`coalesce(sum(${purchases.amountPaid}), 0)`,
-      last30DaysCents: sql<number>`coalesce(sum(case when ${purchases.createdAt} >= ${cutoff} then ${purchases.amountPaid} else 0 end), 0)`,
+      last30DaysCents: sql<number>`coalesce(sum(case when ${purchases.createdAt} between ${since} and ${until} then ${purchases.amountPaid} else 0 end), 0)`,
     })
     .from(purchases)
     .where(inArray(purchases.courseId, courseIds))
@@ -163,14 +196,9 @@ function getGrossSalesByCourse(
   return sales;
 }
 
-// ─── Metric: unanswered comments ───
-// The questions queue's rule, shared from commentService so the dashboard and
-// /instructor/questions always agree. One batched GROUP BY over the course IDs.
-function getUnansweredCommentsByCourse(courseIds: number[]): Map<number, number> {
-  return getUnansweredCommentCountsByCourse(courseIds);
-}
-
 // ─── Metric: quiz score and pass rate ───
+// Only attempts by users enrolled in the course count — the instructor trying
+// their own quiz, or anyone without an enrolment, is left out.
 // For each (student, quiz) in the course, keep only the best attempt (highest
 // score; a passing attempt wins a tie). Then average those best scores and
 // take the share of them that passed. Courses with no attempts are absent
@@ -195,6 +223,13 @@ function getQuizStatsByCourse(courseIds: number[]): Map<number, QuizStats> {
     .innerJoin(quizzes, eq(quizzes.id, quizAttempts.quizId))
     .innerJoin(lessons, eq(lessons.id, quizzes.lessonId))
     .innerJoin(modules, eq(modules.id, lessons.moduleId))
+    .innerJoin(
+      enrollments,
+      and(
+        eq(enrollments.userId, quizAttempts.userId),
+        eq(enrollments.courseId, modules.courseId)
+      )
+    )
     .where(inArray(modules.courseId, courseIds))
     .as("ranked");
 
@@ -216,51 +251,6 @@ function getQuizStatsByCourse(courseIds: number[]): Map<number, QuizStats> {
     });
   }
   return stats;
-}
-
-// ─── Metric: new students ───
-// Enrolments whose enrolment date falls within 30 days of `now` (inclusive),
-// across all included courses.
-const NEW_STUDENT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
-
-function getNewStudentCount(courseIds: number[], now: Date): number {
-  if (courseIds.length === 0) return 0;
-
-  const since = new Date(now.getTime() - NEW_STUDENT_WINDOW_MS).toISOString();
-  const row = db
-    .select({ count: sql<number>`count(*)` })
-    .from(enrollments)
-    .where(
-      and(
-        inArray(enrollments.courseId, courseIds),
-        gte(enrollments.enrolledAt, since),
-        lte(enrollments.enrolledAt, now.toISOString())
-      )
-    )
-    .get();
-
-  return row?.count ?? 0;
-}
-
-// ─── Metric: completion rate ───
-// Enrolments with a completion date per course; divided by students when
-// assembling rows (null when a course has no students).
-function getCompletedCountsByCourse(courseIds: number[]): Map<number, number> {
-  const counts = new Map<number, number>();
-  if (courseIds.length === 0) return counts;
-
-  const rows = db
-    .select({
-      courseId: enrollments.courseId,
-      count: sql<number>`count(${enrollments.completedAt})`,
-    })
-    .from(enrollments)
-    .where(inArray(enrollments.courseId, courseIds))
-    .groupBy(enrollments.courseId)
-    .all();
-
-  for (const row of rows) counts.set(row.courseId, row.count);
-  return counts;
 }
 
 // ─── Metric: average progress ───
@@ -336,17 +326,18 @@ export function getInstructorAnalytics(
   const courseIds = includedCourses.map((c) => c.id);
 
   // One batched query per metric.
-  const studentCounts = getStudentCountsByCourse(courseIds);
+  const enrollmentStats = getEnrollmentStatsByCourse(courseIds, now);
   const ratingSummaries = getCourseRatingSummaries(courseIds);
   const grossSales = getGrossSalesByCourse(courseIds, now);
-  const unansweredCounts = getUnansweredCommentsByCourse(courseIds);
+  // The questions queue's rule, shared so the dashboard and
+  // /instructor/questions always agree.
+  const unansweredCounts = getUnansweredCommentCountsByCourse(courseIds);
   const quizStats = getQuizStatsByCourse(courseIds);
-  const newStudents = getNewStudentCount(courseIds, now);
-  const completedCounts = getCompletedCountsByCourse(courseIds);
   const averageProgress = getAverageProgressByCourse(courseIds);
 
   const rows: InstructorCourseRow[] = includedCourses.map((course) => {
-    const students = studentCounts.get(course.id) ?? 0;
+    const enrolment = enrollmentStats.get(course.id);
+    const students = enrolment?.students ?? 0;
     return {
       id: course.id,
       title: course.title,
@@ -360,7 +351,7 @@ export function getInstructorAnalytics(
       averageQuizScore: quizStats.get(course.id)?.averageQuizScore ?? null,
       quizPassRate: quizStats.get(course.id)?.quizPassRate ?? null,
       completionRate:
-        students === 0 ? null : (completedCounts.get(course.id) ?? 0) / students,
+        students === 0 ? null : (enrolment?.completed ?? 0) / students,
       averageProgress: averageProgress.get(course.id) ?? null,
     };
   });
@@ -376,7 +367,9 @@ export function getInstructorAnalytics(
       [...grossSales.values()].map((s) => s.last30DaysCents)
     ),
     unansweredComments: sum(rows.map((r) => r.unansweredComments)),
-    newStudentsLast30Days: newStudents,
+    newStudentsLast30Days: sum(
+      [...enrollmentStats.values()].map((s) => s.newLast30Days)
+    ),
   };
 
   return { summary, courses: rows };

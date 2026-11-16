@@ -5,13 +5,18 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+/** Format an amount in USD cents as "$X.XX" — 0 renders as "$0.00". */
+export function formatCents(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
+}
+
 /**
  * Format a price in cents to a display string.
  * 0 or null/undefined → "Free", otherwise "$X.XX".
  */
 export function formatPrice(cents: number | null | undefined): string {
   if (!cents) return "Free";
-  return `$${(cents / 100).toFixed(2)}`;
+  return formatCents(cents);
 }
 
 /** Whole days between an ISO timestamp and now. Negative values clamp to 0. */

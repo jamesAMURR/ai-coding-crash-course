@@ -138,7 +138,9 @@ export default function Dashboard({ loaderData }: Route.ComponentProps) {
         <InstructorAnalyticsSection analytics={instructorAnalytics} />
       )}
 
-      {totalCourses === 0 ? (
+      {/* The "start learning" prompt is for students; an instructor with no
+          enrolments just sees their analytics. */}
+      {totalCourses === 0 && instructorAnalytics ? null : totalCourses === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <GraduationCap className="mb-4 size-12 text-muted-foreground/50" />
           <h2 className="text-lg font-medium">No enrolled courses</h2>

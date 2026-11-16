@@ -4,7 +4,7 @@ import { Plus } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { CourseStatus } from "~/db/schema";
-import { formatPrice } from "~/lib/utils";
+import { formatCents } from "~/lib/utils";
 import type {
   InstructorAnalytics,
   InstructorAnalyticsSummary,
@@ -22,11 +22,6 @@ export function formatMetric<T>(
   format: (value: T) => ReactNode = (v) => String(v)
 ): ReactNode {
   return value === null || value === undefined ? "—" : format(value);
-}
-
-// formatPrice renders 0 as "Free", which misreads for earnings; show $0.00.
-function formatSales(cents: number) {
-  return cents === 0 ? "$0.00" : formatPrice(cents);
 }
 
 type Tile = {
@@ -52,9 +47,9 @@ const TILES: Tile[] = [
   },
   {
     label: "Gross sales",
-    value: (s) => formatMetric(s.grossSalesCents, formatSales),
+    value: (s) => formatMetric(s.grossSalesCents, formatCents),
     detail: (s) =>
-      `${formatMetric(s.grossSalesLast30DaysCents, formatSales)} in the last 30 days`,
+      `${formatMetric(s.grossSalesLast30DaysCents, formatCents)} in the last 30 days`,
   },
   {
     label: "Unanswered comments",
@@ -107,7 +102,7 @@ const COLUMNS: Column[] = [
   {
     header: "Gross sales",
     align: "right",
-    cell: (row) => formatMetric(row.grossSalesCents, formatSales),
+    cell: (row) => formatMetric(row.grossSalesCents, formatCents),
   },
   {
     header: "Unanswered comments",
@@ -118,13 +113,13 @@ const COLUMNS: Column[] = [
     header: "Avg. quiz score",
     align: "right",
     cell: (row) =>
-      formatMetric(row.averageQuizScore, (v) => `${Math.round(v * 100)}%`),
+      formatMetric(row.averageQuizScore, formatPercent),
   },
   {
     header: "Pass rate",
     align: "right",
     cell: (row) =>
-      formatMetric(row.quizPassRate, (v) => `${Math.round(v * 100)}%`),
+      formatMetric(row.quizPassRate, formatPercent),
   },
   {
     header: "% completed",
