@@ -9,6 +9,10 @@ import { Skeleton } from "~/components/ui/skeleton";
 import { AlertTriangle, BookOpen, CheckCircle2, GraduationCap, PlayCircle } from "lucide-react";
 import { CourseImage } from "~/components/course-image";
 import { data, isRouteErrorResponse } from "react-router";
+import { getUserById } from "~/services/userService";
+import { getInstructorAnalytics } from "~/services/instructorAnalyticsService";
+import { InstructorAnalyticsSection } from "~/components/instructor-analytics";
+import { UserRole } from "~/db/schema";
 
 export function meta() {
   return [
@@ -59,7 +63,14 @@ export async function loader({ request }: Route.LoaderArgs) {
   const completedCourses = coursesWithProgress.filter((c) => c.isCompleted);
   const inProgressCourses = coursesWithProgress.filter((c) => !c.isCompleted);
 
-  return { inProgressCourses, completedCourses };
+  // Instructors also get their analytics section; other roles see no change.
+  const user = getUserById(currentUserId);
+  const instructorAnalytics =
+    user?.role === UserRole.Instructor
+      ? getInstructorAnalytics(currentUserId)
+      : null;
+
+  return { inProgressCourses, completedCourses, instructorAnalytics };
 }
 
 function DashboardCardSkeleton() {
@@ -102,7 +113,7 @@ export function HydrateFallback() {
 }
 
 export default function Dashboard({ loaderData }: Route.ComponentProps) {
-  const { inProgressCourses, completedCourses } = loaderData;
+  const { inProgressCourses, completedCourses, instructorAnalytics } = loaderData;
   const totalCourses = inProgressCourses.length + completedCourses.length;
 
   return (
@@ -122,6 +133,10 @@ export default function Dashboard({ loaderData }: Route.ComponentProps) {
           Track your learning progress
         </p>
       </div>
+
+      {instructorAnalytics && (
+        <InstructorAnalyticsSection analytics={instructorAnalytics} />
+      )}
 
       {totalCourses === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-center">
