@@ -30,7 +30,8 @@ import { parseFormData } from "~/lib/validation";
 // lesson — which is how a Q&A feature quietly becomes a list of things nobody
 // ever answered.
 //
-// "Unanswered" is derived, not stored: see commentService.getUnansweredQuestions.
+// "Unanswered" is derived, not stored: see the unanswered rule
+// (whereUnanswered) in commentService.
 
 // A question sitting this long without an answer gets called out visually.
 const STALE_AFTER_DAYS = 3;

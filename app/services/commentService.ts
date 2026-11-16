@@ -10,8 +10,9 @@ import {
   sql,
   desc,
   asc,
+  type SQL,
 } from "drizzle-orm";
-import { alias } from "drizzle-orm/sqlite-core";
+import { alias, type SQLiteSelect } from "drizzle-orm/sqlite-core";
 import { db } from "~/db";
 import {
   comments,
@@ -275,13 +276,24 @@ export type QueuedQuestion = {
 // course's instructor or an admin, and has no live reply from the course's
 // instructor or an admin. This is the single definition: the questions queue
 // and the per-course counts both build on it, so they can never disagree.
-//
-// Queries using it must select from `comments`, join `unansweredAuthor` on
-// `comments.userId`, and join through lessons and modules to `courses`.
 
+/** The comment's author, as joined by whereUnanswered. */
 const unansweredAuthor = alias(users, "author");
 
-function unansweredConditions() {
+/**
+ * Narrows a select over `comments` to unanswered comments. Joins the author (as
+ * `unansweredAuthor`), lesson, module and course, so the caller's select may
+ * use any of them. Extra conditions are ANDed with the rule; the caller chains
+ * groupBy/orderBy on the result.
+ *
+ * Takes a dynamic query (`db.select(...).from(comments).$dynamic()`) rather
+ * than the select fields because Drizzle can't type joins over a generic
+ * selection.
+ */
+function whereUnanswered<T extends SQLiteSelect<"comments">>(
+  query: T,
+  ...extraConditions: SQL[]
+) {
   const reply = alias(comments, "reply");
   const replyAuthor = alias(users, "reply_author");
 
@@ -301,14 +313,22 @@ function unansweredConditions() {
       )
     );
 
-  return [
-    isNull(comments.parentId),
-    isNull(comments.deletedAt),
-    // Staff asking their own question shouldn't queue up as work for themselves.
-    ne(unansweredAuthor.role, UserRole.Admin),
-    ne(comments.userId, courses.instructorId),
-    notExists(staffReply),
-  ];
+  return query
+    .innerJoin(unansweredAuthor, eq(comments.userId, unansweredAuthor.id))
+    .innerJoin(lessons, eq(comments.lessonId, lessons.id))
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .innerJoin(courses, eq(modules.courseId, courses.id))
+    .where(
+      and(
+        isNull(comments.parentId),
+        isNull(comments.deletedAt),
+        // Staff asking their own question shouldn't queue up as work for themselves.
+        ne(unansweredAuthor.role, UserRole.Admin),
+        ne(comments.userId, courses.instructorId),
+        notExists(staffReply),
+        ...extraConditions
+      )
+    );
 }
 
 /**
@@ -323,14 +343,13 @@ export function getUnansweredCommentCountsByCourse(
   const counts = new Map<number, number>(courseIds.map((id) => [id, 0]));
   if (courseIds.length === 0) return counts;
 
-  const rows = db
-    .select({ courseId: courses.id, count: count() })
-    .from(comments)
-    .innerJoin(unansweredAuthor, eq(comments.userId, unansweredAuthor.id))
-    .innerJoin(lessons, eq(comments.lessonId, lessons.id))
-    .innerJoin(modules, eq(lessons.moduleId, modules.id))
-    .innerJoin(courses, eq(modules.courseId, courses.id))
-    .where(and(...unansweredConditions(), inArray(courses.id, courseIds)))
+  const rows = whereUnanswered(
+    db
+      .select({ courseId: courses.id, count: count() })
+      .from(comments)
+      .$dynamic(),
+    inArray(courses.id, courseIds)
+  )
     .groupBy(courses.id)
     .all();
 
@@ -348,32 +367,27 @@ export function getUnansweredCommentCountsByCourse(
 export function getUnansweredQuestions(
   instructorId: number | null
 ): QueuedQuestion[] {
-  const author = unansweredAuthor;
-  const conditions = unansweredConditions();
+  const scope =
+    instructorId === null ? [] : [eq(courses.instructorId, instructorId)];
 
-  if (instructorId !== null) {
-    conditions.push(eq(courses.instructorId, instructorId));
-  }
-
-  return db
-    .select({
-      id: comments.id,
-      body: comments.body,
-      createdAt: comments.createdAt,
-      lessonId: lessons.id,
-      lessonTitle: lessons.title,
-      courseTitle: courses.title,
-      courseSlug: courses.slug,
-      authorId: author.id,
-      authorName: author.name,
-      authorAvatarUrl: author.avatarUrl,
-    })
-    .from(comments)
-    .innerJoin(author, eq(comments.userId, author.id))
-    .innerJoin(lessons, eq(comments.lessonId, lessons.id))
-    .innerJoin(modules, eq(lessons.moduleId, modules.id))
-    .innerJoin(courses, eq(modules.courseId, courses.id))
-    .where(and(...conditions))
+  return whereUnanswered(
+    db
+      .select({
+        id: comments.id,
+        body: comments.body,
+        createdAt: comments.createdAt,
+        lessonId: lessons.id,
+        lessonTitle: lessons.title,
+        courseTitle: courses.title,
+        courseSlug: courses.slug,
+        authorId: unansweredAuthor.id,
+        authorName: unansweredAuthor.name,
+        authorAvatarUrl: unansweredAuthor.avatarUrl,
+      })
+      .from(comments)
+      .$dynamic(),
+    ...scope
+  )
     .orderBy(desc(comments.createdAt), desc(comments.id))
     .all();
 }
