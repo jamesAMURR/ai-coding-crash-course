@@ -1,6 +1,13 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "~/db";
-import { courses, enrollments, purchases, CourseStatus } from "~/db/schema";
+import {
+  courses,
+  courseRatings,
+  enrollments,
+  purchases,
+  CourseStatus,
+} from "~/db/schema";
+import { getCourseRatingSummaries } from "~/services/courseRatingService";
 
 // ─── Instructor Analytics Service ───
 // Builds the whole instructor analytics payload for /dashboard in one call.
@@ -26,12 +33,16 @@ export type InstructorCourseRow = {
   slug: string;
   status: CourseStatus;
   students: number;
+  ratingAverage: number | null;
+  ratingCount: number;
   grossSalesCents: number;
 };
 
 export type InstructorAnalyticsSummary = {
   coursesTeaching: number;
   totalStudents: number;
+  averageRating: number | null;
+  ratingCount: number;
   grossSalesCents: number;
   grossSalesLast30DaysCents: number;
 };
@@ -80,6 +91,24 @@ function getStudentCountsByCourse(courseIds: number[]): Map<number, number> {
 
   for (const row of rows) counts.set(row.courseId, row.count);
   return counts;
+}
+
+// ─── Metric: ratings ───
+// Per-course average and count reuse the batched getCourseRatingSummaries.
+// The portfolio average is weighted by rating count — the mean of every
+// individual rating — so it is computed from the raw rows in one query rather
+// than from the (rounded) course averages.
+function getPortfolioRating(courseIds: number[]): number | null {
+  if (courseIds.length === 0) return null;
+
+  const result = db
+    .select({ average: sql<number | null>`avg(${courseRatings.rating})` })
+    .from(courseRatings)
+    .where(inArray(courseRatings.courseId, courseIds))
+    .get();
+
+  const average = result?.average ?? null;
+  return average === null ? null : Math.round(average * 10) / 10;
 }
 
 // ─── Metric: gross sales ───
@@ -133,6 +162,7 @@ export function getInstructorAnalytics(
 
   // One batched query per metric.
   const studentCounts = getStudentCountsByCourse(courseIds);
+  const ratingSummaries = getCourseRatingSummaries(courseIds);
   const grossSales = getGrossSalesByCourse(courseIds, now);
 
   const rows: InstructorCourseRow[] = includedCourses.map((course) => ({
@@ -141,6 +171,8 @@ export function getInstructorAnalytics(
     slug: course.slug,
     status: course.status,
     students: studentCounts.get(course.id) ?? 0,
+    ratingAverage: ratingSummaries.get(course.id)?.average ?? null,
+    ratingCount: ratingSummaries.get(course.id)?.count ?? 0,
     grossSalesCents: grossSales.get(course.id)?.allTimeCents ?? 0,
   }));
 
@@ -148,6 +180,8 @@ export function getInstructorAnalytics(
     coursesTeaching: rows.filter((r) => r.status === CourseStatus.Published)
       .length,
     totalStudents: sum(rows.map((r) => r.students)),
+    averageRating: getPortfolioRating(courseIds),
+    ratingCount: sum(rows.map((r) => r.ratingCount)),
     grossSalesCents: sum(rows.map((r) => r.grossSalesCents)),
     grossSalesLast30DaysCents: sum(
       [...grossSales.values()].map((s) => s.last30DaysCents)

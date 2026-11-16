@@ -45,6 +45,11 @@ const TILES: Tile[] = [
     value: (s) => formatMetric(s.totalStudents),
   },
   {
+    label: "Average rating",
+    value: (s) => formatMetric(s.averageRating, (v) => `${v.toFixed(1)} ★`),
+    detail: (s) => `${s.ratingCount} ${s.ratingCount === 1 ? "rating" : "ratings"}`,
+  },
+  {
     label: "Gross sales",
     value: (s) => formatMetric(s.grossSalesCents, formatSales),
     detail: (s) =>
@@ -75,6 +80,15 @@ const COLUMNS: Column[] = [
     header: "Students",
     align: "right",
     cell: (row) => formatMetric(row.students),
+  },
+  {
+    header: "Rating",
+    align: "right",
+    cell: (row) =>
+      formatMetric(
+        row.ratingAverage,
+        (v) => `${v.toFixed(1)} ★ (${row.ratingCount})`
+      ),
   },
   {
     header: "Gross sales",
