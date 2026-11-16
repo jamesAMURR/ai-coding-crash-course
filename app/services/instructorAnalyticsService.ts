@@ -1,15 +1,17 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, lte, sql } from "drizzle-orm";
 import { db } from "~/db";
 import {
   courses,
   courseRatings,
   enrollments,
+  lessonProgress,
   lessons,
   modules,
   purchases,
   quizAttempts,
   quizzes,
   CourseStatus,
+  LessonProgressStatus,
 } from "~/db/schema";
 import { getCourseRatingSummaries } from "~/services/courseRatingService";
 import { getUnansweredCommentCountsByCourse } from "~/services/commentService";
@@ -44,6 +46,8 @@ export type InstructorCourseRow = {
   unansweredComments: number;
   averageQuizScore: number | null;
   quizPassRate: number | null;
+  completionRate: number | null;
+  averageProgress: number | null;
 };
 
 export type InstructorAnalyticsSummary = {
@@ -54,6 +58,7 @@ export type InstructorAnalyticsSummary = {
   grossSalesCents: number;
   grossSalesLast30DaysCents: number;
   unansweredComments: number;
+  newStudentsLast30Days: number;
 };
 
 export type InstructorAnalytics = {
@@ -213,6 +218,112 @@ function getQuizStatsByCourse(courseIds: number[]): Map<number, QuizStats> {
   return stats;
 }
 
+// ─── Metric: new students ───
+// Enrolments whose enrolment date falls within 30 days of `now` (inclusive),
+// across all included courses.
+const NEW_STUDENT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+function getNewStudentCount(courseIds: number[], now: Date): number {
+  if (courseIds.length === 0) return 0;
+
+  const since = new Date(now.getTime() - NEW_STUDENT_WINDOW_MS).toISOString();
+  const row = db
+    .select({ count: sql<number>`count(*)` })
+    .from(enrollments)
+    .where(
+      and(
+        inArray(enrollments.courseId, courseIds),
+        gte(enrollments.enrolledAt, since),
+        lte(enrollments.enrolledAt, now.toISOString())
+      )
+    )
+    .get();
+
+  return row?.count ?? 0;
+}
+
+// ─── Metric: completion rate ───
+// Enrolments with a completion date per course; divided by students when
+// assembling rows (null when a course has no students).
+function getCompletedCountsByCourse(courseIds: number[]): Map<number, number> {
+  const counts = new Map<number, number>();
+  if (courseIds.length === 0) return counts;
+
+  const rows = db
+    .select({
+      courseId: enrollments.courseId,
+      count: sql<number>`count(${enrollments.completedAt})`,
+    })
+    .from(enrollments)
+    .where(inArray(enrollments.courseId, courseIds))
+    .groupBy(enrollments.courseId)
+    .all();
+
+  for (const row of rows) counts.set(row.courseId, row.count);
+  return counts;
+}
+
+// ─── Metric: average progress ───
+// Per enrolled student: completed lessons ÷ total lessons in the course,
+// averaged across enrolled students. Null when a course has no students or
+// no lessons. Two batched queries: lesson totals per course, and completed
+// lessons per enrolment.
+function getAverageProgressByCourse(
+  courseIds: number[]
+): Map<number, number | null> {
+  const averages = new Map<number, number | null>();
+  if (courseIds.length === 0) return averages;
+
+  const lessonTotals = new Map<number, number>();
+  const totalRows = db
+    .select({
+      courseId: modules.courseId,
+      count: sql<number>`count(${lessons.id})`,
+    })
+    .from(modules)
+    .innerJoin(lessons, eq(lessons.moduleId, modules.id))
+    .where(inArray(modules.courseId, courseIds))
+    .groupBy(modules.courseId)
+    .all();
+  for (const row of totalRows) lessonTotals.set(row.courseId, row.count);
+
+  // One row per enrolment, with that student's completed lessons in the course.
+  const perEnrolment = db
+    .select({
+      courseId: enrollments.courseId,
+      completed: sql<number>`count(${lessonProgress.id})`,
+    })
+    .from(enrollments)
+    .leftJoin(modules, eq(modules.courseId, enrollments.courseId))
+    .leftJoin(lessons, eq(lessons.moduleId, modules.id))
+    .leftJoin(
+      lessonProgress,
+      and(
+        eq(lessonProgress.lessonId, lessons.id),
+        eq(lessonProgress.userId, enrollments.userId),
+        eq(lessonProgress.status, LessonProgressStatus.Completed)
+      )
+    )
+    .where(inArray(enrollments.courseId, courseIds))
+    .groupBy(enrollments.id)
+    .all();
+
+  const fractions = new Map<number, number[]>();
+  for (const row of perEnrolment) {
+    const total = lessonTotals.get(row.courseId) ?? 0;
+    if (total === 0) continue;
+    const list = fractions.get(row.courseId) ?? [];
+    list.push(row.completed / total);
+    fractions.set(row.courseId, list);
+  }
+
+  for (const courseId of courseIds) {
+    const list = fractions.get(courseId);
+    averages.set(courseId, list ? sum(list) / list.length : null);
+  }
+  return averages;
+}
+
 function sum(values: number[]) {
   return values.reduce((total, value) => total + value, 0);
 }
@@ -230,20 +341,29 @@ export function getInstructorAnalytics(
   const grossSales = getGrossSalesByCourse(courseIds, now);
   const unansweredCounts = getUnansweredCommentsByCourse(courseIds);
   const quizStats = getQuizStatsByCourse(courseIds);
+  const newStudents = getNewStudentCount(courseIds, now);
+  const completedCounts = getCompletedCountsByCourse(courseIds);
+  const averageProgress = getAverageProgressByCourse(courseIds);
 
-  const rows: InstructorCourseRow[] = includedCourses.map((course) => ({
-    id: course.id,
-    title: course.title,
-    slug: course.slug,
-    status: course.status,
-    students: studentCounts.get(course.id) ?? 0,
-    ratingAverage: ratingSummaries.get(course.id)?.average ?? null,
-    ratingCount: ratingSummaries.get(course.id)?.count ?? 0,
-    grossSalesCents: grossSales.get(course.id)?.allTimeCents ?? 0,
-    unansweredComments: unansweredCounts.get(course.id) ?? 0,
-    averageQuizScore: quizStats.get(course.id)?.averageQuizScore ?? null,
-    quizPassRate: quizStats.get(course.id)?.quizPassRate ?? null,
-  }));
+  const rows: InstructorCourseRow[] = includedCourses.map((course) => {
+    const students = studentCounts.get(course.id) ?? 0;
+    return {
+      id: course.id,
+      title: course.title,
+      slug: course.slug,
+      status: course.status,
+      students,
+      ratingAverage: ratingSummaries.get(course.id)?.average ?? null,
+      ratingCount: ratingSummaries.get(course.id)?.count ?? 0,
+      grossSalesCents: grossSales.get(course.id)?.allTimeCents ?? 0,
+      unansweredComments: unansweredCounts.get(course.id) ?? 0,
+      averageQuizScore: quizStats.get(course.id)?.averageQuizScore ?? null,
+      quizPassRate: quizStats.get(course.id)?.quizPassRate ?? null,
+      completionRate:
+        students === 0 ? null : (completedCounts.get(course.id) ?? 0) / students,
+      averageProgress: averageProgress.get(course.id) ?? null,
+    };
+  });
 
   const summary: InstructorAnalyticsSummary = {
     coursesTeaching: rows.filter((r) => r.status === CourseStatus.Published)
@@ -256,6 +376,7 @@ export function getInstructorAnalytics(
       [...grossSales.values()].map((s) => s.last30DaysCents)
     ),
     unansweredComments: sum(rows.map((r) => r.unansweredComments)),
+    newStudentsLast30Days: newStudents,
   };
 
   return { summary, courses: rows };
