@@ -37,6 +37,7 @@ const TILES: Tile[] = [
   {
     label: "Total students",
     value: (s) => formatMetric(s.totalStudents),
+    detail: (s) => `${s.newStudentsLast30Days} new in the last 30 days`,
   },
 ];
 
@@ -64,7 +65,21 @@ const COLUMNS: Column[] = [
     align: "right",
     cell: (row) => formatMetric(row.students),
   },
+  {
+    header: "% completed",
+    align: "right",
+    cell: (row) => formatMetric(row.completionRate, formatPercent),
+  },
+  {
+    header: "Avg. progress",
+    align: "right",
+    cell: (row) => formatMetric(row.averageProgress, formatPercent),
+  },
 ];
+
+function formatPercent(ratio: number) {
+  return `${Math.round(ratio * 100)}%`;
+}
 
 function StatusBadge({ status }: { status: CourseStatus }) {
   if (status === CourseStatus.Archived) {

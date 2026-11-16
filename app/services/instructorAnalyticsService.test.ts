@@ -63,6 +63,47 @@ function enrol(userId: number, courseId: number) {
     .get();
 }
 
+function enrolAt(
+  userId: number,
+  courseId: number,
+  dates: { enrolledAt?: string; completedAt?: string | null }
+) {
+  return testDb
+    .insert(schema.enrollments)
+    .values({ userId, courseId, ...dates })
+    .returning()
+    .get();
+}
+
+let positionCounter = 0;
+
+function createLesson(courseId: number) {
+  positionCounter += 1;
+  const mod = testDb
+    .insert(schema.modules)
+    .values({ courseId, title: `Module ${positionCounter}`, position: positionCounter })
+    .returning()
+    .get();
+  return testDb
+    .insert(schema.lessons)
+    .values({ moduleId: mod.id, title: `Lesson ${positionCounter}`, position: positionCounter })
+    .returning()
+    .get();
+}
+
+function completeLesson(userId: number, lessonId: number) {
+  return testDb
+    .insert(schema.lessonProgress)
+    .values({
+      userId,
+      lessonId,
+      status: schema.LessonProgressStatus.Completed,
+      completedAt: new Date().toISOString(),
+    })
+    .returning()
+    .get();
+}
+
 function courseRow(analytics: ReturnType<typeof getInstructorAnalytics>, id: number) {
   return analytics.courses.find((c) => c.id === id);
 }
@@ -158,6 +199,85 @@ describe("instructorAnalyticsService", () => {
       const analytics = getInstructorAnalytics(base.instructor.id);
 
       expect(courseRow(analytics, base.course.id)?.students).toBe(0);
+    });
+  });
+  describe("new students", () => {
+    const now = new Date("2026-06-30T12:00:00.000Z");
+    const daysAgo = (days: number, extraMs = 0) =>
+      new Date(now.getTime() - days * 24 * 60 * 60 * 1000 - extraMs).toISOString();
+
+    it("counts enrolments within 30 days of now, inclusive of the boundary", () => {
+      const archived = createCourse(schema.CourseStatus.Archived);
+      const [a, b, c, d] = [createUser(), createUser(), createUser(), createUser()];
+      enrolAt(a.id, base.course.id, { enrolledAt: daysAgo(1) });
+      enrolAt(b.id, base.course.id, { enrolledAt: daysAgo(30) });
+      enrolAt(c.id, base.course.id, { enrolledAt: daysAgo(30, 1) });
+      enrolAt(d.id, archived.id, { enrolledAt: daysAgo(10) });
+
+      const analytics = getInstructorAnalytics(base.instructor.id, now);
+
+      expect(analytics.summary.newStudentsLast30Days).toBe(3);
+    });
+
+    it("is zero when there are no recent enrolments", () => {
+      enrolAt(base.user.id, base.course.id, { enrolledAt: daysAgo(90) });
+
+      const analytics = getInstructorAnalytics(base.instructor.id, now);
+
+      expect(analytics.summary.newStudentsLast30Days).toBe(0);
+    });
+  });
+
+  describe("completion rate and average progress", () => {
+    it("handles a mix of finished, partly done and not-started students", () => {
+      const lessons = [1, 2, 3, 4].map(() => createLesson(base.course.id));
+      const [finished, partial, notStarted] = [createUser(), createUser(), createUser()];
+      enrolAt(finished.id, base.course.id, { completedAt: new Date().toISOString() });
+      enrolAt(partial.id, base.course.id, {});
+      enrolAt(notStarted.id, base.course.id, {});
+      for (const lesson of lessons) completeLesson(finished.id, lesson.id);
+      completeLesson(partial.id, lessons[0].id);
+
+      // Progress in another course must not leak into this one.
+      const other = createCourse(schema.CourseStatus.Published);
+      const otherLesson = createLesson(other.id);
+      completeLesson(notStarted.id, otherLesson.id);
+      // An in-progress (not completed) lesson does not count.
+      testDb
+        .insert(schema.lessonProgress)
+        .values({
+          userId: partial.id,
+          lessonId: lessons[1].id,
+          status: schema.LessonProgressStatus.InProgress,
+        })
+        .run();
+
+      const analytics = getInstructorAnalytics(base.instructor.id);
+      const row = courseRow(analytics, base.course.id);
+
+      expect(row?.completionRate).toBeCloseTo(1 / 3);
+      // (4/4 + 1/4 + 0/4) / 3
+      expect(row?.averageProgress).toBeCloseTo(1.25 / 3);
+    });
+
+    it("returns null for a course with no students", () => {
+      createLesson(base.course.id);
+
+      const analytics = getInstructorAnalytics(base.instructor.id);
+      const row = courseRow(analytics, base.course.id);
+
+      expect(row?.completionRate).toBeNull();
+      expect(row?.averageProgress).toBeNull();
+    });
+
+    it("returns null average progress for a course with students but no lessons", () => {
+      enrolAt(base.user.id, base.course.id, {});
+
+      const analytics = getInstructorAnalytics(base.instructor.id);
+      const row = courseRow(analytics, base.course.id);
+
+      expect(row?.completionRate).toBe(0);
+      expect(row?.averageProgress).toBeNull();
     });
   });
 });
