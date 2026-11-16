@@ -13,6 +13,7 @@ vi.mock("~/db", () => ({
 
 // Import after mock so the module picks up our test db
 import { getInstructorAnalytics } from "./instructorAnalyticsService";
+import { getUnansweredQuestions } from "./commentService";
 
 // ─── Fixtures ───
 // Small builders shared by every metric's tests. Later tickets add their own
@@ -158,6 +159,114 @@ describe("instructorAnalyticsService", () => {
       const analytics = getInstructorAnalytics(base.instructor.id);
 
       expect(courseRow(analytics, base.course.id)?.students).toBe(0);
+    });
+  });
+
+  describe("unanswered comments", () => {
+    function createLesson(courseId: number) {
+      const mod = testDb
+        .insert(schema.modules)
+        .values({ courseId, title: "Module", position: 1 })
+        .returning()
+        .get();
+      return testDb
+        .insert(schema.lessons)
+        .values({ moduleId: mod.id, title: "Lesson", position: 1 })
+        .returning()
+        .get();
+    }
+
+    function comment(
+      userId: number,
+      lessonId: number,
+      opts: { parentId?: number; deleted?: boolean } = {}
+    ) {
+      return testDb
+        .insert(schema.comments)
+        .values({
+          userId,
+          lessonId,
+          parentId: opts.parentId ?? null,
+          body: "A comment",
+          deletedAt: opts.deleted ? new Date().toISOString() : null,
+        })
+        .returning()
+        .get();
+    }
+
+    it("counts per course and in total, matching the questions queue", () => {
+      const archived = createCourse(schema.CourseStatus.Archived);
+      const lesson = createLesson(base.course.id);
+      const archivedLesson = createLesson(archived.id);
+      const second = createUser();
+      comment(base.user.id, lesson.id);
+      comment(second.id, lesson.id);
+      comment(base.user.id, archivedLesson.id);
+
+      const analytics = getInstructorAnalytics(base.instructor.id);
+
+      expect(courseRow(analytics, base.course.id)?.unansweredComments).toBe(2);
+      expect(courseRow(analytics, archived.id)?.unansweredComments).toBe(1);
+      expect(analytics.summary.unansweredComments).toBe(3);
+      expect(analytics.summary.unansweredComments).toBe(
+        getUnansweredQuestions(base.instructor.id).length
+      );
+    });
+
+    it("treats a reply from the instructor or an admin as resolving the comment", () => {
+      const lesson = createLesson(base.course.id);
+      const admin = createUser(schema.UserRole.Admin);
+      const byInstructor = comment(base.user.id, lesson.id);
+      const byAdmin = comment(base.user.id, lesson.id);
+      const byStudent = comment(base.user.id, lesson.id);
+      comment(base.instructor.id, lesson.id, { parentId: byInstructor.id });
+      comment(admin.id, lesson.id, { parentId: byAdmin.id });
+      comment(createUser().id, lesson.id, { parentId: byStudent.id });
+
+      const analytics = getInstructorAnalytics(base.instructor.id);
+
+      expect(courseRow(analytics, base.course.id)?.unansweredComments).toBe(1);
+      expect(analytics.summary.unansweredComments).toBe(1);
+    });
+
+    it("ignores deleted comments and deleted staff replies", () => {
+      const lesson = createLesson(base.course.id);
+      comment(base.user.id, lesson.id, { deleted: true });
+      const stillOpen = comment(base.user.id, lesson.id);
+      comment(base.instructor.id, lesson.id, {
+        parentId: stillOpen.id,
+        deleted: true,
+      });
+
+      const analytics = getInstructorAnalytics(base.instructor.id);
+
+      expect(analytics.summary.unansweredComments).toBe(1);
+      expect(analytics.summary.unansweredComments).toBe(
+        getUnansweredQuestions(base.instructor.id).length
+      );
+    });
+
+    it("leaves out comments written by the instructor or an admin", () => {
+      const lesson = createLesson(base.course.id);
+      comment(base.instructor.id, lesson.id);
+      comment(createUser(schema.UserRole.Admin).id, lesson.id);
+
+      const analytics = getInstructorAnalytics(base.instructor.id);
+
+      expect(courseRow(analytics, base.course.id)?.unansweredComments).toBe(0);
+      expect(analytics.summary.unansweredComments).toBe(0);
+    });
+
+    it("leaves out comments on draft courses and other instructors' courses", () => {
+      const draft = createCourse(schema.CourseStatus.Draft);
+      const other = createUser(schema.UserRole.Instructor);
+      const theirs = createCourse(schema.CourseStatus.Published, other.id);
+      comment(base.user.id, createLesson(draft.id).id);
+      comment(base.user.id, createLesson(theirs.id).id);
+
+      const analytics = getInstructorAnalytics(base.instructor.id);
+
+      expect(analytics.summary.unansweredComments).toBe(0);
     });
   });
 });

@@ -38,6 +38,19 @@ const TILES: Tile[] = [
     label: "Total students",
     value: (s) => formatMetric(s.totalStudents),
   },
+  {
+    label: "Unanswered comments",
+    value: (s) => (
+      <Link to="/instructor/questions" className="hover:text-primary">
+        {formatMetric(s.unansweredComments)}
+      </Link>
+    ),
+    detail: () => (
+      <Link to="/instructor/questions" className="hover:text-primary">
+        View questions
+      </Link>
+    ),
+  },
 ];
 
 type Column = {
@@ -63,6 +76,11 @@ const COLUMNS: Column[] = [
     header: "Students",
     align: "right",
     cell: (row) => formatMetric(row.students),
+  },
+  {
+    header: "Unanswered comments",
+    align: "right",
+    cell: (row) => formatMetric(row.unansweredComments),
   },
 ];
 

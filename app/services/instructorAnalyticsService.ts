@@ -1,6 +1,7 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "~/db";
 import { courses, enrollments, CourseStatus } from "~/db/schema";
+import { getUnansweredCommentCountsByCourse } from "~/services/commentService";
 
 // ─── Instructor Analytics Service ───
 // Builds the whole instructor analytics payload for /dashboard in one call.
@@ -26,11 +27,13 @@ export type InstructorCourseRow = {
   slug: string;
   status: CourseStatus;
   students: number;
+  unansweredComments: number;
 };
 
 export type InstructorAnalyticsSummary = {
   coursesTeaching: number;
   totalStudents: number;
+  unansweredComments: number;
 };
 
 export type InstructorAnalytics = {
@@ -79,6 +82,13 @@ function getStudentCountsByCourse(courseIds: number[]): Map<number, number> {
   return counts;
 }
 
+// ─── Metric: unanswered comments ───
+// The questions queue's rule, shared from commentService so the dashboard and
+// /instructor/questions always agree. One batched GROUP BY over the course IDs.
+function getUnansweredCommentsByCourse(courseIds: number[]): Map<number, number> {
+  return getUnansweredCommentCountsByCourse(courseIds);
+}
+
 function sum(values: number[]) {
   return values.reduce((total, value) => total + value, 0);
 }
@@ -94,6 +104,7 @@ export function getInstructorAnalytics(
 
   // One batched query per metric.
   const studentCounts = getStudentCountsByCourse(courseIds);
+  const unansweredCounts = getUnansweredCommentsByCourse(courseIds);
 
   const rows: InstructorCourseRow[] = includedCourses.map((course) => ({
     id: course.id,
@@ -101,12 +112,14 @@ export function getInstructorAnalytics(
     slug: course.slug,
     status: course.status,
     students: studentCounts.get(course.id) ?? 0,
+    unansweredComments: unansweredCounts.get(course.id) ?? 0,
   }));
 
   const summary: InstructorAnalyticsSummary = {
     coursesTeaching: rows.filter((r) => r.status === CourseStatus.Published)
       .length,
     totalStudents: sum(rows.map((r) => r.students)),
+    unansweredComments: sum(rows.map((r) => r.unansweredComments)),
   };
 
   return { summary, courses: rows };
