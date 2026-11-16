@@ -8,6 +8,7 @@ import {
   CourseStatus,
 } from "~/db/schema";
 import { getCourseRatingSummaries } from "~/services/courseRatingService";
+import { getUnansweredCommentCountsByCourse } from "~/services/commentService";
 
 // ─── Instructor Analytics Service ───
 // Builds the whole instructor analytics payload for /dashboard in one call.
@@ -36,6 +37,7 @@ export type InstructorCourseRow = {
   ratingAverage: number | null;
   ratingCount: number;
   grossSalesCents: number;
+  unansweredComments: number;
 };
 
 export type InstructorAnalyticsSummary = {
@@ -45,6 +47,7 @@ export type InstructorAnalyticsSummary = {
   ratingCount: number;
   grossSalesCents: number;
   grossSalesLast30DaysCents: number;
+  unansweredComments: number;
 };
 
 export type InstructorAnalytics = {
@@ -149,6 +152,13 @@ function getGrossSalesByCourse(
   return sales;
 }
 
+// ─── Metric: unanswered comments ───
+// The questions queue's rule, shared from commentService so the dashboard and
+// /instructor/questions always agree. One batched GROUP BY over the course IDs.
+function getUnansweredCommentsByCourse(courseIds: number[]): Map<number, number> {
+  return getUnansweredCommentCountsByCourse(courseIds);
+}
+
 function sum(values: number[]) {
   return values.reduce((total, value) => total + value, 0);
 }
@@ -164,6 +174,7 @@ export function getInstructorAnalytics(
   const studentCounts = getStudentCountsByCourse(courseIds);
   const ratingSummaries = getCourseRatingSummaries(courseIds);
   const grossSales = getGrossSalesByCourse(courseIds, now);
+  const unansweredCounts = getUnansweredCommentsByCourse(courseIds);
 
   const rows: InstructorCourseRow[] = includedCourses.map((course) => ({
     id: course.id,
@@ -174,6 +185,7 @@ export function getInstructorAnalytics(
     ratingAverage: ratingSummaries.get(course.id)?.average ?? null,
     ratingCount: ratingSummaries.get(course.id)?.count ?? 0,
     grossSalesCents: grossSales.get(course.id)?.allTimeCents ?? 0,
+    unansweredComments: unansweredCounts.get(course.id) ?? 0,
   }));
 
   const summary: InstructorAnalyticsSummary = {
@@ -186,6 +198,7 @@ export function getInstructorAnalytics(
     grossSalesLast30DaysCents: sum(
       [...grossSales.values()].map((s) => s.last30DaysCents)
     ),
+    unansweredComments: sum(rows.map((r) => r.unansweredComments)),
   };
 
   return { summary, courses: rows };

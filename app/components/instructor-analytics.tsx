@@ -55,6 +55,19 @@ const TILES: Tile[] = [
     detail: (s) =>
       `${formatMetric(s.grossSalesLast30DaysCents, formatSales)} in the last 30 days`,
   },
+  {
+    label: "Unanswered comments",
+    value: (s) => (
+      <Link to="/instructor/questions" className="hover:text-primary">
+        {formatMetric(s.unansweredComments)}
+      </Link>
+    ),
+    detail: () => (
+      <Link to="/instructor/questions" className="hover:text-primary">
+        View questions
+      </Link>
+    ),
+  },
 ];
 
 type Column = {
@@ -94,6 +107,11 @@ const COLUMNS: Column[] = [
     header: "Gross sales",
     align: "right",
     cell: (row) => formatMetric(row.grossSalesCents, formatSales),
+  },
+  {
+    header: "Unanswered comments",
+    align: "right",
+    cell: (row) => formatMetric(row.unansweredComments),
   },
 ];
 
